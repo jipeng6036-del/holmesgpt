@@ -1,0 +1,58 @@
+name: verify unused request headers
+
+on:
+  push:
+    branches: [verify/2568-unused-request-headers]
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 85ab082495723869aec699219677695188ca38a8
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install the locked development dependencies
+        run: |
+          python -m pip install "poetry==1.8.5"
+          poetry install --no-root --with dev
+      - name: Reproduce the regression on the unchanged upstream implementation
+        run: |
+          git show 18820cfbf77742762efa3d283a53b341d0f53a16:holmes/core/tools.py > holmes/core/tools.py
+          set +e
+          poetry run pytest tests/test_header_propagation.py -k unused -n 0 --no-cov -q --junitxml=baseline.xml
+          result=$?
+          set -e
+          test "$result" -eq 1
+          python - <<'PY'
+          import xml.etree.ElementTree as ET
+          suite = ET.parse("baseline.xml").getroot().find("testsuite")
+          assert suite.attrib["tests"] == "10", suite.attrib
+          assert suite.attrib["failures"] == "10", suite.attrib
+          assert suite.attrib["errors"] == "0", suite.attrib
+          assert suite.attrib["skipped"] == "0", suite.attrib
+          print("Confirmed: all ten unused-header command/script cases fail on the upstream implementation.")
+          PY
+          git restore holmes/core/tools.py
+      - name: Run header propagation and existing command-injection regression tests
+        run: poetry run pytest tests/test_header_propagation.py tests/plugins/toolsets/test_toolset_command_injection.py tests/plugins/toolsets/test_kubernetes_yaml_injection.py -n 2 --no-cov -q
+      - name: Run the complete non-LLM test suite
+        run: poetry run pytest -m "not llm" --cov-report= -p no:sugar -q --no-header -o log_cli=false --tb=short -W ignore --json-report --json-report-file=test-results.json
+      - name: Check the patch whitespace
+        run: git diff --check 18820cfbf77742762efa3d283a53b341d0f53a16 HEAD
+      - name: Save test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unused-headers-test-results
+          path: |
+            baseline.xml
+            test-results.json
