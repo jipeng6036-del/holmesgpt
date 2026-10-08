@@ -14,7 +14,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: 85ab082495723869aec699219677695188ca38a8
+          ref: 5e351ede27f035c80276a538dbd8e6c62844d64e
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-python@v5
@@ -44,6 +44,33 @@ jobs:
           git restore holmes/core/tools.py
       - name: Run header propagation and existing command-injection regression tests
         run: poetry run pytest tests/test_header_propagation.py tests/plugins/toolsets/test_toolset_command_injection.py tests/plugins/toolsets/test_kubernetes_yaml_injection.py -n 2 --no-cov -q
+      - name: Compare scoped static checks with the unchanged upstream files
+        run: |
+          set +e
+          poetry run ruff check holmes/core/tools.py tests/test_header_propagation.py --output-format json > fixed-ruff.json
+          poetry run mypy holmes/core/tools.py --follow-imports=silent --show-error-codes --no-error-summary > fixed-mypy.txt
+          set -e
+          git show 18820cfbf77742762efa3d283a53b341d0f53a16:holmes/core/tools.py > holmes/core/tools.py
+          git show 18820cfbf77742762efa3d283a53b341d0f53a16:tests/test_header_propagation.py > tests/test_header_propagation.py
+          set +e
+          poetry run ruff check holmes/core/tools.py tests/test_header_propagation.py --output-format json > baseline-ruff.json
+          poetry run mypy holmes/core/tools.py --follow-imports=silent --show-error-codes --no-error-summary > baseline-mypy.txt
+          set -e
+          git restore holmes/core/tools.py tests/test_header_propagation.py
+          python - <<'PY'
+          import collections, json, re
+          from pathlib import Path
+          def ruff(path):
+              return collections.Counter((x["code"], x["message"], x["filename"]) for x in json.loads(Path(path).read_text()))
+          def mypy(path):
+              return collections.Counter(re.sub(r":\d+(?::\d+)?:", ":", x) for x in Path(path).read_text().splitlines() if ": error:" in re.sub(r":\d+(?::\d+)?:", ":", x))
+          for name, read in [("ruff", ruff), ("mypy", mypy)]:
+              fixed = read("fixed-" + name + (".json" if name == "ruff" else ".txt"))
+              baseline = read("baseline-" + name + (".json" if name == "ruff" else ".txt"))
+              added = fixed - baseline
+              print(name, "baseline", sum(baseline.values()), "fixed", sum(fixed.values()), "added", dict(added))
+              assert not added, added
+          PY
       - name: Run the complete non-LLM test suite
         run: poetry run pytest -m "not llm" --cov-report= -p no:sugar -q --no-header -o log_cli=false --tb=short -W ignore --json-report --json-report-file=test-results.json
       - name: Check the patch whitespace
@@ -56,3 +83,5 @@ jobs:
           path: |
             baseline.xml
             test-results.json
+            *-ruff.json
+            *-mypy.txt
